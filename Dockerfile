@@ -21,9 +21,10 @@ COPY package.json ./
 COPY src ./src
 COPY public ./public
 
-# Mounted Railway volume. DB_PATH points here so the mirror survives deploys.
+# The Railway volume is mounted at /data by the platform, not by Docker
+# (a VOLUME instruction is rejected at build time). DB_PATH points into it so
+# the mirror survives deploys.
 ENV DB_PATH=/data/canvas.db
-VOLUME ["/data"]
 
 EXPOSE 3000
 CMD ["node", "src/server.js"]
