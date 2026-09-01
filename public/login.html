@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CanvasGPT</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:grid; place-items:center;
+    font:15px/1.5 ui-sans-serif,-apple-system,"SF Pro Text",Inter,system-ui,sans-serif;
+    background:#0d0f12; color:#e8e9ec; }
+  form { width:min(92vw,340px); display:grid; gap:14px; }
+  h1 { margin:0; font-size:22px; letter-spacing:-.02em; }
+  p { margin:0; color:#8b8f98; font-size:13px; }
+  input { padding:11px 13px; border-radius:9px; border:1px solid #262a31; background:#15181d; color:inherit; font-size:15px; }
+  input:focus { outline:none; border-color:#3f7dd8; }
+  button { padding:11px; border-radius:9px; border:0; background:#3f7dd8; color:#fff; font-weight:600; font-size:15px; cursor:pointer; }
+  button:hover { background:#4a89e5; }
+  .err { color:#f2777a; font-size:13px; min-height:18px; }
+</style></head>
+<body>
+<form id="f">
+  <h1>CanvasGPT</h1>
+  <p>Private. Ask anything about your Canvas.</p>
+  <input id="p" type="password" placeholder="Password" autofocus autocomplete="current-password">
+  <button>Enter</button>
+  <div class="err" id="e"></div>
+</form>
+<script>
+  f.onsubmit = async (ev) => {
+    ev.preventDefault();
+    e.textContent = '';
+    const r = await fetch('/api/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: p.value }),
+    });
+    if (r.ok) location.href = '/';
+    else { e.textContent = (await r.json()).error || 'Nope.'; p.select(); }
+  };
+</script>
+</body></html>

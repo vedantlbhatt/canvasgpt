@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CanvasGPT settings</title>
+<style>
+  :root { color-scheme: dark; --bg:#0d0f12; --panel:#12151a; --line:#22262e; --text:#e8e9ec;
+          --dim:#8b8f98; --accent:#5b9cf0; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); min-height:100vh;
+    font:15px/1.6 ui-sans-serif,-apple-system,"SF Pro Text",Inter,system-ui,sans-serif; }
+  .page { max-width:660px; margin:0 auto; padding:40px 24px 80px; }
+  a.back { color:var(--dim); text-decoration:none; font-size:13px; }
+  a.back:hover { color:var(--text); }
+  h1 { font-size:21px; letter-spacing:-.02em; margin:14px 0 26px; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:18px 20px; margin-bottom:18px; }
+  h2 { font-size:14px; margin:0 0 12px; letter-spacing:-.01em; }
+  .row { display:flex; justify-content:space-between; gap:16px; padding:6px 0; font-size:13.5px; }
+  .row span:first-child { color:var(--dim); }
+  .pill { border-radius:20px; padding:1px 10px; font-size:12px; font-weight:600; }
+  .ok { background:#12301c; color:#63d68a; }
+  .bad { background:#3a1a1c; color:#f2777a; }
+  .warn { background:#332612; color:#e0a75e; }
+  textarea { width:100%; min-height:110px; resize:vertical; background:#171b21; color:var(--text);
+    border:1px solid var(--line); border-radius:10px; padding:11px 13px;
+    font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  textarea:focus { outline:none; border-color:#33507c; }
+  button { background:var(--accent); border:0; color:#fff; border-radius:9px; padding:9px 16px;
+    font-weight:600; font-size:14px; cursor:pointer; margin-top:10px; }
+  button.ghost { background:#1d222a; border:1px solid var(--line); color:var(--text); }
+  button:disabled { opacity:.45; cursor:default; }
+  .msg { margin-top:10px; font-size:13.5px; min-height:20px; }
+  ol { padding-left:20px; color:var(--dim); font-size:13.5px; }
+  ol li { margin:7px 0; }
+  code { background:#181d24; padding:1px 6px; border-radius:5px; font-size:12.5px;
+    font-family:ui-monospace,Menlo,monospace; color:#a9c7ee; }
+  .note { color:var(--dim); font-size:12.5px; margin-top:12px; }
+</style></head>
+<body>
+<div class="page">
+  <a class="back" href="/">&larr; back to chat</a>
+  <h1>Settings</h1>
+
+  <section>
+    <h2>Sync status</h2>
+    <div id="status"></div>
+    <button class="ghost" id="syncNow">Sync now</button>
+    <div class="msg" id="syncMsg"></div>
+  </section>
+
+  <section>
+    <h2>Canvas session cookie</h2>
+    <p style="margin:0 0 12px;color:var(--dim);font-size:13.5px">
+      Georgia Tech disables student access tokens, so the sync rides your browser
+      session instead. The cookie dies when you log out of Canvas or after a few
+      weeks &mdash; when it does, paste a fresh one here. No redeploy needed.
+    </p>
+    <textarea id="cookie" placeholder="canvas_session=...; _normandy_session=...; _csrf_token=..." spellcheck="false"></textarea>
+    <button id="save">Save and sync</button>
+    <div class="msg" id="cookieMsg"></div>
+    <div class="note">Stored on the server's disk, never shown again, never given to the chat model.</div>
+  </section>
+
+  <section>
+    <h2>How to copy the cookie</h2>
+    <ol>
+      <li>Open <code>gatech.instructure.com</code> in Chrome and make sure you're logged in.</li>
+      <li>Press <code>Cmd+Option+I</code> to open DevTools, then click the <b>Network</b> tab.</li>
+      <li>Reload the page. Click the very first request in the list (it'll be named <code>dashboard</code> or similar).</li>
+      <li>In the panel that opens, scroll to <b>Request Headers</b> and find the <code>cookie:</code> line.</li>
+      <li>Right-click that line &rarr; <b>Copy value</b>. Paste the whole thing above.</li>
+    </ol>
+    <div class="note">
+      It's a live credential for your student account. This app only ever sends
+      GET requests with it &mdash; it can read your Canvas, never change it.
+    </div>
+  </section>
+</div>
+<script>
+const $ = (s) => document.querySelector(s);
+
+function pill(state) {
+  const map = {
+    ok: ['ok', 'synced'], running: ['warn', 'syncing'], stalled: ['bad', 'cookie expired'],
+    error: ['bad', 'error'], no_cookie: ['warn', 'no cookie'], never: ['warn', 'never run'],
+    idle: ['warn', 'waiting'],
+  };
+  const [cls, label] = map[state] || ['warn', state];
+  return '<span class="pill ' + cls + '">' + label + '</span>';
+}
+
+const when = (iso) => (iso ? new Date(iso).toLocaleString() : 'never');
+
+async function load() {
+  const r = await fetch('/api/sync/status');
+  if (r.status === 401) return location.href = '/';
+  const s = await r.json();
+  $('#status').innerHTML =
+    '<div class="row"><span>State</span>' + pill(s.running ? 'running' : s.state) + '</div>' +
+    '<div class="row"><span>Last successful sync</span><span>' + when(s.last_sync_at) + '</span></div>' +
+    '<div class="row"><span>Last attempt</span><span>' + when(s.last_attempt_at) + '</span></div>' +
+    '<div class="row"><span>Cookie</span><span>' + (s.cookie_configured ? 'configured ' + when(s.cookie_set_at) : 'not set') + '</span></div>' +
+    (s.last_error ? '<div class="row"><span>Error</span><span style="color:#f2777a">' + s.last_error + '</span></div>' : '');
+  $('#syncNow').disabled = s.running || !s.cookie_configured;
+  return s;
+}
+
+$('#syncNow').onclick = async () => {
+  $('#syncMsg').textContent = 'Starting...';
+  const r = await fetch('/api/sync/now', { method: 'POST' });
+  const j = await r.json();
+  $('#syncMsg').textContent = r.ok ? 'Sync running. This takes a minute or two.' : j.error;
+  const poll = setInterval(async () => {
+    const s = await load();
+    if (!s.running) { clearInterval(poll); $('#syncMsg').textContent = s.state === 'ok' ? 'Done.' : (s.last_error || ''); }
+  }, 3000);
+};
+
+$('#save').onclick = async () => {
+  const cookie = $('#cookie').value.trim();
+  if (!cookie) return;
+  $('#save').disabled = true;
+  $('#cookieMsg').textContent = 'Saving and running a first sync...';
+  const r = await fetch('/api/settings/cookie', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cookie }),
+  });
+  const j = await r.json();
+  $('#cookie').value = '';
+  $('#cookieMsg').innerHTML = r.ok
+    ? '<span style="color:#63d68a">Working. Synced ' + j.stats.courses + ' courses, ' + j.stats.changes + ' changes.</span>'
+    : '<span style="color:#f2777a">' + j.error + '</span>';
+  $('#save').disabled = false;
+  load();
+};
+
+load();
+setInterval(load, 15000);
+</script>
+</body></html>
