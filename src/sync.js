@@ -198,8 +198,10 @@ export function startScheduler(db, { hours = 12, log = console.log } = {}) {
     try {
       log(`sync: starting (${reason})`);
       await runSync(db, { log });
-    } catch {
-      /* state already recorded on the db; keep serving what we have */
+    } catch (err) {
+      // State is already recorded on the db and we keep serving what we have,
+      // but say why out loud so a quiet log is not mistaken for a healthy one.
+      log(`sync: skipped — ${err.message}`);
     } finally {
       running = false;
     }
