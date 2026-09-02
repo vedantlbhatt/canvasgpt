@@ -23,7 +23,12 @@ const courseLine = (c) => ({
   score: c.current_score, grade: c.current_grade,
 });
 
-export function buildCanvasTools(db) {
+/**
+ * The tool definitions themselves: plain {name, description, inputSchema, handler}
+ * objects. Shared so the local agent and the remote MCP connector expose exactly
+ * the same seven read-only tools rather than drifting apart.
+ */
+export function canvasToolDefs(db) {
   const listDue = tool(
     'list_due',
     'List assignments and quizzes with due dates in a window. Use for "what is due", "this week", "overdue". Dates are stored UTC and returned with a local America/New_York rendering.',
@@ -66,10 +71,10 @@ export function buildCanvasTools(db) {
 
   const search = tool(
     'search',
-    'Full-text search across assignment descriptions, announcements, discussions, page bodies, syllabi, quiz descriptions, module items and file names. Use this whenever the question is about content rather than dates.',
+    'Full-text search across assignment descriptions, announcements, discussions, individual discussion replies, page bodies, syllabi, quiz descriptions, module items and file names. Use this whenever the question is about content rather than dates.',
     {
       query: z.string().describe('FTS5 query. Plain words are AND-ed; use "quoted phrases" for exact phrases; OR is supported.'),
-      kind: z.enum(['assignment', 'announcement', 'discussion', 'page', 'syllabus', 'quiz', 'file', 'module']).optional(),
+      kind: z.enum(['assignment', 'announcement', 'discussion', 'reply', 'page', 'syllabus', 'quiz', 'file', 'module']).optional(),
       course: z.string().optional().describe('Course name, code, or id.'),
       limit: z.number().int().default(10),
     },
@@ -120,7 +125,7 @@ export function buildCanvasTools(db) {
         teachers: JSON.parse(c.teachers || '[]'),
         counts: {},
       };
-      for (const [t, col] of [['assignments', 'id'], ['discussions', 'id'], ['pages', 'page_id'], ['files', 'id'], ['modules', 'id'], ['quizzes', 'id']]) {
+      for (const [t, col] of [['assignments', 'id'], ['discussions', 'id'], ['discussion_entries', 'id'], ['pages', 'page_id'], ['files', 'id'], ['modules', 'id'], ['quizzes', 'id']]) {
         out.counts[t] = db.prepare(`SELECT COUNT(*) n FROM ${t} WHERE course_id = ?`).get(c.id).n;
       }
       if (include.includes('syllabus')) out.syllabus = truncate(c.syllabus_text, 8000) || '(none published)';
@@ -144,13 +149,15 @@ export function buildCanvasTools(db) {
 
   const getItem = tool(
     'get_item',
-    'Full text of one item: an assignment (description, rubric-ish details, your submission state), an announcement or discussion, a page, or a quiz. Look up by numeric id from a previous result, or by name.',
+    'Full text of one item: an assignment (description, rubric-ish details, your submission state), an announcement or discussion (including its replies, paged), a page, or a quiz. Look up by numeric id from a previous result, or by name.',
     {
       kind: z.enum(['assignment', 'announcement', 'discussion', 'page', 'quiz']),
       id_or_name: z.string(),
       course: z.string().optional().describe('Narrows a name lookup.'),
+      reply_limit: z.number().int().default(20).describe('Replies to return for a discussion or announcement.'),
+      reply_offset: z.number().int().default(0).describe('Skip this many replies, for paging through a long thread.'),
     },
-    async ({ kind, id_or_name, course }) => {
+    async ({ kind, id_or_name, course, reply_limit, reply_offset }) => {
       const numeric = /^\d+$/.test(id_or_name.trim());
       const courseIds = course ? findCourses(db, course).map((c) => c.id) : null;
       const cf = courseIds?.length ? `AND t.course_id IN (${courseIds.join(',')})` : '';
@@ -191,9 +198,34 @@ export function buildCanvasTools(db) {
         due_utc: r.due_at, due_local: localTime(r.due_at), points_possible: r.points_possible,
         question_count: r.question_count, time_limit_minutes: r.time_limit,
       });
-      if (kind === 'announcement' || kind === 'discussion') Object.assign(out, {
-        posted_at: r.posted_at, posted_local: localTime(r.posted_at), author: r.author,
-      });
+      if (kind === 'announcement' || kind === 'discussion') {
+        Object.assign(out, {
+          posted_at: r.posted_at, posted_local: localTime(r.posted_at), author: r.author,
+        });
+        // The opening post is usually the prompt; the answer is in the replies.
+        // A busy thread runs to tens of thousands of characters, so this returns
+        // a window rather than the whole thing and says how to reach the rest.
+        const total = db.prepare(
+          'SELECT COUNT(*) n FROM discussion_entries WHERE topic_id = ? AND deleted = 0',
+        ).get(r.id).n;
+        const replies = db.prepare(
+          `SELECT id, parent_id, depth, author, created_at, message_text
+             FROM discussion_entries WHERE topic_id = ? AND deleted = 0
+            ORDER BY created_at, id LIMIT ? OFFSET ?`,
+        ).all(r.id, reply_limit, reply_offset);
+        out.reply_count = total;
+        out.replies_shown = replies.length ? `${reply_offset + 1}-${reply_offset + replies.length} of ${total}` : `0 of ${total}`;
+        if (reply_offset + replies.length < total) {
+          out.more_replies = `Call get_item again with reply_offset=${reply_offset + replies.length} for the next ${reply_limit}.`;
+        }
+        if (replies.length) {
+          out.replies = replies.map((e) => ({
+            id: e.id, parent_id: e.parent_id, depth: e.depth, author: e.author,
+            posted_local: localTime(e.created_at),
+            text: truncate(e.message_text, 1200),
+          }));
+        }
+      }
       return json(out);
     },
   );
@@ -273,12 +305,18 @@ export function buildCanvasTools(db) {
     },
   );
 
-  return createSdkMcpServer({
-    name: 'canvas',
-    version: '0.1.0',
-    instructions: 'Read-only access to the user\'s mirrored Georgia Tech Canvas data in SQLite.',
-    tools: [listCourses, listDue, search, getCourse, getItem, grades, recentChanges],
-  });
+  return [listCourses, listDue, search, getCourse, getItem, grades, recentChanges];
+}
+
+export const CANVAS_SERVER_INFO = {
+  name: 'canvas',
+  version: '0.1.0',
+  instructions: "Read-only access to the user's mirrored Georgia Tech Canvas data in SQLite.",
+};
+
+/** In-process server for the local chat agent. */
+export function buildCanvasTools(db) {
+  return createSdkMcpServer({ ...CANVAS_SERVER_INFO, tools: canvasToolDefs(db) });
 }
 
 export const CANVAS_TOOL_NAMES = [

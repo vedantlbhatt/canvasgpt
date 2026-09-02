@@ -8,6 +8,7 @@ import { runTurn } from './agent.js';
 import { ingestDump } from './ingest.js';
 import { startScheduler, runSync, setCookie, syncStatus, getCookie } from './sync.js';
 import { verifyLive, storedReachability } from './verify.js';
+import { mountMcp } from './mcp.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 loadEnvFile(path.join(__dirname, '..', '.env'));
@@ -241,6 +242,10 @@ app.get('/api/changes', requireAuth, (req, res) => {
     ).all(limit),
   });
 });
+
+// Remote MCP endpoint for Claude connectors. Mounted before the auth-gated
+// pages because it carries its own bearer credential, not the session cookie.
+mountMcp(app, db);
 
 app.get('/verify', (req, res) => {
   if (!req.session) return res.redirect('/');
