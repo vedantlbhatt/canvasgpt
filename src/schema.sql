@@ -190,3 +190,39 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_msg_session ON chat_messages(session_id, id);
+
+-- Per-course, per-resource reachability from the last sync. Without this the
+-- reason a course has no files (locked vs. feature off vs. genuinely empty)
+-- lives only in the sync log and is lost on restart.
+CREATE TABLE IF NOT EXISTS resource_status (
+  course_id INTEGER,
+  resource TEXT,
+  ok INTEGER,
+  http_status INTEGER,
+  row_count INTEGER,
+  recovered INTEGER DEFAULT 0,
+  checked_at TEXT,
+  PRIMARY KEY (course_id, resource)
+);
+
+-- Individual replies inside a discussion or announcement thread. The topic list
+-- endpoints return only the opening post; the thread body needs a per-topic
+-- fetch, so without this table every reply in every course is invisible.
+CREATE TABLE IF NOT EXISTS discussion_entries (
+  id INTEGER PRIMARY KEY,
+  topic_id INTEGER,
+  course_id INTEGER,
+  parent_id INTEGER,
+  depth INTEGER,
+  author TEXT,
+  author_id INTEGER,
+  message_html TEXT,
+  message_text TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  deleted INTEGER,
+  content_hash TEXT,
+  last_seen_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_entries_topic ON discussion_entries(topic_id);
+CREATE INDEX IF NOT EXISTS idx_entries_course ON discussion_entries(course_id);

@@ -17,7 +17,14 @@ export function startMockCanvas(opts = {}) {
     courses = defaultCourses(),
     assignmentsByCourse = defaultAssignments(),
     quizzesByCourse = null,   // null = default one quiz per course; {} = none
+    throttle = null,          // { path: 'courses/1/assignments', times: 2, retryAfter: 0 }
+    moduleItems = {},         // course id -> module items, for recovery tests
+    threadsByTopic = {},      // topic id -> nested entry tree
+    subentryCounts = {},      // topic id -> discussion_subentry_count
+    participantsByTopic = {}, // topic id -> [{ id, display_name }]
   } = opts;
+
+  let throttled = 0;
 
   const state = { requests: 0, paths: [], methods: new Set(), cookiesSeen: new Set() };
 
@@ -33,6 +40,15 @@ export function startMockCanvas(opts = {}) {
     if (!req.headers.cookie) return send(res, 401, { status: 'unauthenticated' });
     if (state.requests > expireAfter) return send(res, 401, { status: 'unauthenticated' });
 
+    // Canvas rate-limits with a bare 429 under load.
+    if (throttle && p === throttle.path && throttled < (throttle.times ?? 1)) {
+      throttled++;
+      const headers = { 'Content-Type': 'application/json; charset=utf-8' };
+      if (throttle.retryAfter != null) headers['Retry-After'] = String(throttle.retryAfter);
+      res.writeHead(429, headers);
+      return res.end('while(1);' + JSON.stringify({ errors: [{ message: 'Rate Limit Exceeded' }] }));
+    }
+
     const courseMatch = p.match(/^courses\/(\d+)\/(.+)$/);
     if (courseMatch) {
       const [, cid, resource] = courseMatch;
@@ -40,9 +56,21 @@ export function startMockCanvas(opts = {}) {
       if ((lockedCourses[cid] || []).includes(head)) {
         return send(res, 403, { status: 'unauthorized', errors: [{ message: 'user not authorized' }] });
       }
-      if ((missingCourses[cid] || []).includes(head)) {
+      // A disabled feature 404s its index but still serves individual objects —
+      // exactly how Canvas behaves when a course hides its Pages tab, and the
+      // gap the module-item recovery pass exists to close. A 403 above, by
+      // contrast, locks the whole subtree.
+      if ((missingCourses[cid] || []).includes(resource)) {
         return send(res, 404, { errors: [{ message: 'The specified resource does not exist.' }] });
       }
+    }
+
+    // Single-file endpoint: answers even when courses/:id/files is 403, which
+    // is what the recovery pass relies on.
+    const fileMatch = p.match(/^files\/(\d+)$/);
+    if (fileMatch) {
+      const fid = Number(fileMatch[1]);
+      return send(res, 200, { id: fid, display_name: `recovered${fid}.pdf`, filename: `recovered${fid}.pdf`, 'content-type': 'application/pdf', size: 42 });
     }
 
     if (p === 'users/self/profile') return send(res, 200, { id: 7, name: 'Test Student', time_zone: 'America/New_York' });
@@ -59,16 +87,31 @@ export function startMockCanvas(opts = {}) {
           body: `<p>Body of ${pageName} in course ${cid}</p>`, updated_at: '2026-01-01T00:00:00Z',
         });
       }
+      const viewMatch = resource.match(/^discussion_topics\/(\d+)\/view$/);
+      if (viewMatch) {
+        // Canvas puts author names in `participants`, not on the entries.
+        return send(res, 200, {
+          view: threadsByTopic[viewMatch[1]] || [],
+          participants: participantsByTopic[viewMatch[1]] || [],
+        });
+      }
+
       switch (head) {
         case 'assignments': return page(res, url, assignmentsByCourse[cid] || [], pageSize);
         case 'discussion_topics': {
           const only = url.searchParams.get('only_announcements') === 'true';
           return page(res, url, only
-            ? [{ id: Number(cid) * 10 + 1, title: `Announcement in ${cid}`, message: '<p>Hello class</p>', posted_at: '2026-02-01T00:00:00Z', html_url: `http://x/courses/${cid}/discussion_topics/1` }]
-            : [{ id: Number(cid) * 10 + 2, title: `Discussion in ${cid}`, message: '<p>Talk</p>', posted_at: '2026-02-02T00:00:00Z', html_url: `http://x/courses/${cid}/discussion_topics/2` }],
+            ? [{ id: Number(cid) * 10 + 1, title: `Announcement in ${cid}`, message: '<p>Hello class</p>', posted_at: '2026-02-01T00:00:00Z', html_url: `http://x/courses/${cid}/discussion_topics/1`, discussion_subentry_count: subentryCounts[Number(cid) * 10 + 1] || 0 }]
+            : [{ id: Number(cid) * 10 + 2, title: `Discussion in ${cid}`, message: '<p>Talk</p>', posted_at: '2026-02-02T00:00:00Z', html_url: `http://x/courses/${cid}/discussion_topics/2`, discussion_subentry_count: subentryCounts[Number(cid) * 10 + 2] || 0 }],
             pageSize);
         }
-        case 'modules': return page(res, url, [{ id: Number(cid) * 10, name: `Module ${cid}`, position: 1, items: [{ title: 'Item A', type: 'Page' }] }], pageSize);
+        case 'modules': return page(res, url, [{
+          id: Number(cid) * 10, name: `Module ${cid}`, position: 1,
+          items: moduleItems[cid] || [
+            { title: 'Item A', type: 'Page', page_url: 'syllabus-page' },
+            { title: `file${cid}.pdf`, type: 'File', content_id: Number(cid) * 10 },
+          ],
+        }], pageSize);
         case 'quizzes': return page(res, url, quizzesByCourse
           ? (quizzesByCourse[cid] || [])
           : [{ id: Number(cid) * 10, title: `Quiz ${cid}`, description: '<p>quiz</p>', points_possible: 10 }], pageSize);
@@ -93,7 +136,10 @@ export function startMockCanvas(opts = {}) {
       resolve({
         url: `http://127.0.0.1:${port}`,
         state,
-        close: () => new Promise((r) => server.close(r)),
+        throttledCount: () => throttled,
+        // Undici keeps sockets alive; without dropping them server.close()
+        // never fires its callback and the test run hangs after the last test.
+        close: () => new Promise((r) => { server.closeAllConnections?.(); server.close(r); }),
       });
     });
   });

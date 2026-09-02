@@ -71,6 +71,29 @@ async function fetchCourse(client, course, log) {
     soft('grading_periods', () => client.get(`courses/${id}/grading_periods`)),
   ]);
 
+  // ---- Recovery passes -------------------------------------------------
+  // A course can lock its Files index (403) or switch Pages off (404) while
+  // still exposing the very same objects as module items. The module item
+  // carries the id, and the per-object endpoints answer 200, so anything
+  // reachable that way is pulled back rather than silently dropped.
+  const moduleItems = (modules || []).flatMap((m) => m.items || []);
+
+  let recoveredFiles = [];
+  if ((files == null || files.denied) && moduleItems.length) {
+    const ids = [...new Set(moduleItems.filter((i) => i.type === 'File' && i.content_id).map((i) => i.content_id))];
+    recoveredFiles = (await client.map(ids, (fid) => soft(`file ${fid}`, () => client.get(`files/${fid}`))))
+      .filter(Boolean);
+    if (recoveredFiles.length) log(`  course ${id}: recovered ${recoveredFiles.length} file(s) via modules`);
+  }
+
+  let recoveredPages = [];
+  if ((pageList == null || pageList.denied) && moduleItems.length) {
+    const urls = [...new Set(moduleItems.filter((i) => i.type === 'Page' && i.page_url).map((i) => i.page_url))];
+    recoveredPages = (await client.map(urls, (u) => soft(`page ${u}`, () => client.get(`courses/${id}/pages/${encodeURIComponent(u)}`))))
+      .filter(Boolean);
+    if (recoveredPages.length) log(`  course ${id}: recovered ${recoveredPages.length} page(s) via modules`);
+  }
+
   // Page bodies need a second GET each; that content is the point of the sync.
   const pages = await client.map(pageList || [], async (p) => {
     if (!p?.url) return p;
@@ -85,26 +108,63 @@ async function fetchCourse(client, course, log) {
     return full ? { ...p, ...full } : p;
   });
 
+  // Thread bodies. The topic list returns only the opening post, so every
+  // reply needs a per-topic fetch. `discussion_subentry_count` tells us which
+  // topics actually have replies, keeping this to the threads that need it.
+  const topics = [...(announcements || []), ...(discussions || [])];
+  const threaded = topics.filter((t) => (t.discussion_subentry_count || 0) > 0);
+  const entries = (await client.map(threaded, async (t) => {
+    const view = await soft(`thread ${t.id}`, () => client.get(`courses/${id}/discussion_topics/${t.id}/view`));
+    // Entries carry only user_id; the display names live in a sibling
+    // `participants` array, so the two have to be joined here or every reply
+    // ends up attributed to nobody.
+    const names = new Map((view?.participants || []).map((u) => [u.id, u.display_name || u.short_name]));
+    return flattenEntries(view?.view || [], t.id, id, null, 0, [], names);
+  })).flat();
+  if (entries.length) log(`  course ${id}: ${entries.length} discussion repl${entries.length === 1 ? 'y' : 'ies'}`);
+
   // Resources we could not read this run. Passed through so the diff engine
   // does not mistake a locked or failed fetch for a deletion.
   const unavailable = [];
+  const reachability = [];
+  const recovered = { files: recoveredFiles.length, pages: recoveredPages.length };
   for (const [key, val] of [
     ['assignments', assignments], ['announcements', announcements], ['discussions', discussions],
     ['pages', pageList], ['quizzes', quizzes], ['files', files], ['modules', modules],
   ]) {
-    if (val == null || val.denied) unavailable.push(key);
+    const bad = val == null || val.denied;
+    // A blocked index that we recovered through modules is no longer a hole in
+    // the data, but it is not a clean read either — record both facts.
+    const salvaged = bad ? (recovered[key] || 0) : 0;
+    if (bad && !salvaged) unavailable.push(key);
+    reachability.push({
+      resource: key,
+      ok: !bad,
+      http_status: val?.deniedStatus || (val == null ? 0 : 200),
+      row_count: bad ? salvaged : val.length,
+      recovered: salvaged,
+    });
   }
+  reachability.push({
+    resource: 'discussion_entries',
+    ok: true,
+    http_status: 200,
+    row_count: entries.length,
+    recovered: 0,
+  });
 
   Object.assign(c, {
     __unavailable: unavailable,
+    __reachability: reachability,
     assignments: assignments || [],
     announcements: announcements || [],
     discussions: discussions || [],
     modules: modules || [],
     quizzes: quizzes || [],
-    files: files || [],
+    files: [...(files || []), ...recoveredFiles],
     folders: folders || [],
-    pages,
+    pages: [...pages, ...recoveredPages],
+    discussion_entries: entries,
     front_page: frontPage || null,
     teachers: teachers?.length ? teachers : course.teachers || [],
     my_enrollment: enrollments || [],
@@ -173,7 +233,8 @@ export async function runSync(db, { log = console.log } = {}) {
     setMeta(db, 'sync_state', 'ok');
     setMeta(db, 'sync_error', '');
     log(`sync: done — ${stats.changes} changes, ${client.stats.requests} requests ` +
-        `(${client.stats.denied} denied, ${client.stats.missing} missing, ${client.stats.retried} retried)`);
+        `(${client.stats.denied} denied, ${client.stats.missing} missing, ` +
+        `${client.stats.retried} retried, ${client.stats.throttled} throttled)`);
     return { ...stats, requests: client.stats };
   } catch (err) {
     if (err instanceof CanvasSessionExpired) {
@@ -210,4 +271,30 @@ export function startScheduler(db, { hours = 12, log = console.log } = {}) {
   timer.unref?.();
   setTimeout(() => tick('boot'), 1500).unref?.();
   return { tick, stop: () => clearInterval(timer), isRunning: () => running };
+}
+
+
+/**
+ * Canvas returns a discussion thread as a nested tree. Flatten it so replies
+ * are addressable rows, keeping parent_id and depth so the shape survives.
+ */
+function flattenEntries(nodes, topicId, courseId, parentId = null, depth = 0, out = [], names = new Map()) {
+  for (const n of nodes) {
+    if (n?.id == null) continue;
+    out.push({
+      id: n.id,
+      topic_id: topicId,
+      course_id: courseId,
+      parent_id: n.parent_id ?? parentId,
+      depth,
+      author: n.user_name ?? n.user?.display_name ?? names.get(n.user_id) ?? null,
+      author_id: n.user_id ?? null,
+      message_html: n.message ?? null,
+      created_at: n.created_at ?? null,
+      updated_at: n.updated_at ?? null,
+      deleted: n.deleted ? 1 : 0,
+    });
+    if (n.replies?.length) flattenEntries(n.replies, topicId, courseId, n.id, depth + 1, out, names);
+  }
+  return out;
 }

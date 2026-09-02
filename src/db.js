@@ -18,6 +18,8 @@ export function openDb(dbPath = process.env.DB_PATH || './data/canvas.db') {
 function migrate(db) {
   const wanted = {
     chat_sessions: { updated_at: 'TEXT', sdk_session_id: 'TEXT' },
+    resource_status: { recovered: 'INTEGER DEFAULT 0' },
+    discussion_entries: { author_id: 'INTEGER' },
   };
   for (const [table, cols] of Object.entries(wanted)) {
     const have = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));

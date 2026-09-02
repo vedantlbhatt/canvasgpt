@@ -51,7 +51,7 @@ export class CanvasClient {
     this.log = log;
     this.concurrency = concurrency;
     this.timeoutMs = timeoutMs;
-    this.stats = { requests: 0, denied: 0, missing: 0, retried: 0 };
+    this.stats = { requests: 0, denied: 0, missing: 0, retried: 0, throttled: 0 };
   }
 
   /** Private so it cannot be reached from a tool, an endpoint, or a stack trace. */
@@ -116,6 +116,20 @@ export class CanvasClient {
       this.stats.missing++;
       return { status: 404, data: null, link: null };
     }
+    // Canvas throttles with a bare 429 as well as with the 403 handled above.
+    // Without this the collection is dropped for the whole run and the resource
+    // silently goes stale, counted in neither `denied` nor `missing`.
+    if (res.status === 429) {
+      if (attempt < 3) {
+        this.stats.retried++;
+        const header = res.headers.get('retry-after');
+        const retryAfter = header == null ? NaN : Number(header) * 1000;
+        await sleep(Number.isFinite(retryAfter) && retryAfter >= 0 ? retryAfter : 2000 * 2 ** attempt);
+        return this.request(pathOrUrl, { attempt: attempt + 1 });
+      }
+      this.stats.throttled++;
+      return { status: 429, data: null, link: null };
+    }
     if (res.status >= 500 && attempt < 2) {
       this.stats.retried++;
       await sleep(1000 * 2 ** attempt);
@@ -153,12 +167,13 @@ export class CanvasClient {
     let url = path;
     let pages = 0;
     let denied = false;
+    let deniedStatus = 0;
     while (url) {
       const { data, link, status } = await this.request(url);
       if (status === 403 || status === 404 || data == null) {
         // An empty array and a locked resource look identical downstream unless
         // we say so; the diff engine must not read "locked" as "deleted".
-        if (pages === 0) denied = true;
+        if (pages === 0) { denied = true; deniedStatus = status; }
         break;
       }
       if (Array.isArray(data)) out.push(...data);
@@ -168,6 +183,9 @@ export class CanvasClient {
       url = link;
     }
     Object.defineProperty(out, 'denied', { value: denied, enumerable: false });
+    // 403 (locked to students) and 404 (feature switched off) are different
+    // stories to tell the user, so keep the code, not just the fact.
+    Object.defineProperty(out, 'deniedStatus', { value: deniedStatus, enumerable: false });
     return out;
   }
 

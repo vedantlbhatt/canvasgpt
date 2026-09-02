@@ -67,7 +67,11 @@ test('a 403 and a 404 midway through a run do not abort it', async () => {
   // The locked course still has everything that was not locked.
   const c2 = db.prepare('SELECT * FROM courses WHERE id=2').get();
   assert.ok(c2, 'locked course row exists');
-  assert.equal(db.prepare('SELECT COUNT(*) n FROM files WHERE course_id=2').get().n, 0, 'locked files skipped');
+  // The files index is locked, but the module item names a file id and the
+  // per-file endpoint is readable, so the recovery pass pulls it back.
+  const c2files = db.prepare('SELECT * FROM files WHERE course_id=2').all();
+  assert.equal(c2files.length, 1, 'locked files recovered through module items');
+  assert.match(c2files[0].display_name, /^recovered/, 'and came from the per-file endpoint');
   assert.ok(db.prepare('SELECT COUNT(*) n FROM assignments WHERE course_id=2').get().n > 0, 'unlocked resources still fetched');
   assert.equal(db.prepare('SELECT COUNT(*) n FROM quizzes WHERE course_id=3').get().n, 0, '404 quizzes skipped');
   assert.ok(db.prepare('SELECT COUNT(*) n FROM assignments WHERE course_id=3').get().n > 0, 'course 3 otherwise intact');

@@ -103,10 +103,22 @@ export function ingestDump(db, dump) {
   const courses = dump.courses || [];
   const courseIds = courses.map((c) => c.id);
   for (const c of courses) ctx.unavailable[c.id] = c.__unavailable || [];
-  const stats = { courses: 0, assignments: 0, announcements: 0, discussions: 0, pages: 0, files: 0, quizzes: 0, modules: 0, submissions: 0, changes: 0 };
+  // Reachability is only known on a live sync; a replayed dump carries none, so
+  // leave whatever the last live run recorded rather than blanking it.
+  const reachability = courses.flatMap((c) => (c.__reachability || []).map((r) => ({ ...r, course_id: c.id })));
+  const stats = { courses: 0, assignments: 0, announcements: 0, discussions: 0, pages: 0, files: 0, quizzes: 0, modules: 0, submissions: 0, replies: 0, changes: 0 };
 
   const run = db.transaction(() => {
     db.prepare('DELETE FROM docs').run();
+
+    const putReach = db.prepare(
+      `INSERT INTO resource_status (course_id, resource, ok, http_status, row_count, recovered, checked_at)
+       VALUES (@course_id, @resource, @ok, @http_status, @row_count, @recovered, @checked_at)
+       ON CONFLICT(course_id, resource) DO UPDATE SET
+         ok=excluded.ok, http_status=excluded.http_status, row_count=excluded.row_count,
+         recovered=excluded.recovered, checked_at=excluded.checked_at`,
+    );
+    for (const r of reachability) putReach.run({ ...r, ok: r.ok ? 1 : 0, recovered: r.recovered ?? 0, checked_at: runAt });
 
     for (const c of courses) {
       const cUrl = `${host}/courses/${c.id}`;
@@ -201,6 +213,38 @@ export function ingestDump(db, dump) {
         });
         if (kind === 'announcement') stats.announcements++; else stats.discussions++;
         addDoc(db, { kind, ref_id: t.id, course_id: c.id, course_name: c.name, title: t.title, url, body: htmlToText(t.message) });
+      }
+
+      // Replies inside each thread. Indexed for search too — the answer to a
+      // question is often in a reply, not in the opening post.
+      for (const e of c.discussion_entries || []) {
+        if (e?.id == null) continue;
+        const url = `${cUrl}/discussion_topics/${e.topic_id}`;
+        const body = htmlToText(e.message_html);
+        upsert(db, ctx, 'discussion_entries', 'id', {
+          id: e.id,
+          topic_id: e.topic_id,
+          course_id: c.id,
+          parent_id: e.parent_id ?? null,
+          depth: e.depth ?? 0,
+          author: e.author ?? null,
+          author_id: e.author_id ?? null,
+          message_html: e.message_html ?? null,
+          message_text: body,
+          created_at: e.created_at ?? null,
+          updated_at: e.updated_at ?? null,
+          deleted: e.deleted ?? 0,
+        }, {
+          entity: 'reply', courseId: c.id, title: `reply by ${e.author || 'someone'}`, url,
+          tracked: ['message_text', 'author', 'deleted'],
+        });
+        stats.replies++;
+        if (body) {
+          addDoc(db, {
+            kind: 'reply', ref_id: e.id, course_id: c.id, course_name: c.name,
+            title: `Reply by ${e.author || 'unknown'}`, url, body,
+          });
+        }
       }
 
       const pages = [...(c.pages || [])];
