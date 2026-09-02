@@ -7,6 +7,7 @@ import { openDb, getMeta } from './db.js';
 import { runTurn } from './agent.js';
 import { ingestDump } from './ingest.js';
 import { startScheduler, runSync, setCookie, syncStatus, getCookie } from './sync.js';
+import { verifyLive, storedReachability } from './verify.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 loadEnvFile(path.join(__dirname, '..', '.env'));
@@ -203,6 +204,47 @@ app.post('/api/ingest', requireAuth, (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// Streams progress while it runs; a full verify re-fetches every active course
+// and can take a while, and a silent spinner is indistinguishable from a hang.
+app.get('/api/verify', requireAuth, async (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  try {
+    const report = await verifyLive(db, {
+      entities: req.query.entities ? String(req.query.entities).split(',') : undefined,
+      courseId: req.query.course ? Number(req.query.course) : null,
+      onProgress: (m) => send({ type: 'progress', message: m }),
+    });
+    send({ type: 'report', report });
+  } catch (e) {
+    send({ type: 'error', error: e.message });
+  }
+  res.end();
+});
+
+// What the last sync could and could not read, per course.
+app.get('/api/reachability', requireAuth, (_req, res) => {
+  res.json({ resources: storedReachability(db) });
+});
+
+// Most recent detected changes — the evidence that syncing is doing work.
+app.get('/api/changes', requireAuth, (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 50, 500);
+  res.json({
+    changes: db.prepare(
+      `SELECT ch.*, c.course_code FROM changes ch
+         LEFT JOIN courses c ON c.id = ch.course_id
+        ORDER BY ch.detected_at DESC, ch.id DESC LIMIT ?`,
+    ).all(limit),
+  });
+});
+
+app.get('/verify', (req, res) => {
+  if (!req.session) return res.redirect('/');
+  res.sendFile(path.join(__dirname, '..', 'public', 'verify.html'));
 });
 
 app.get('/', (req, res) => {
