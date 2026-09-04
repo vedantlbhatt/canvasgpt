@@ -37,6 +37,25 @@ claude mcp add --transport http canvas https://<your-host>/mcp \
   --header "Authorization: Bearer $MCP_TOKEN"
 ```
 
+In the claude.ai connector dialog, set **Authentication: None** and add the
+credential as a request header instead:
+
+| Field        | Value                     |
+| ------------ | ------------------------- |
+| URL          | `https://<your-host>/mcp` |
+| Header name  | `Authorization`           |
+| Header value | `Bearer <MCP_TOKEN>`      |
+
+"Always required" starts an OAuth flow, and this server implements no OAuth —
+only the bearer token — so that setting fails to connect. The dialog reporting
+that sign-in was *detected* is just it seeing the `401` and
+`WWW-Authenticate: Bearer` that the endpoint returns unauthenticated.
+
+For a client whose form takes a URL and nothing else, the token may ride in the
+path as `https://<your-host>/mcp/<MCP_TOKEN>`. That puts a live credential in
+browser history and proxy logs, so prefer the header wherever there is a field
+for one.
+
 The connector is stateless (a fresh server per request, no sessions to leak),
 read-only (every tool advertises `readOnlyHint`), and carries its own bearer
 credential — the app's `APP_PASSWORD` session cookie does not grant access to
