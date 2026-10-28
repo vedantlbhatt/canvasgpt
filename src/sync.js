@@ -253,6 +253,7 @@ export async function runSync(db, { log = console.log } = {}) {
 /** Sync on boot, then every `hours`. Failures never kill the process. */
 export function startScheduler(db, { hours = 12, log = console.log } = {}) {
   let running = false;
+  /** Resolves when this run finishes. Never rejects: state is recorded on the db. */
   const tick = async (reason) => {
     if (running) return;
     running = true;

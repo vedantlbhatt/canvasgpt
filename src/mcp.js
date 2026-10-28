@@ -16,7 +16,9 @@
 import crypto from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { z } from 'zod';
 import { canvasToolDefs, CANVAS_SERVER_INFO } from './tools.js';
+import { syncStatus } from './sync.js';
 
 /** Constant-time compare that tolerates length mismatch without leaking it. */
 export function tokenMatches(given, expected) {
@@ -32,8 +34,18 @@ export function bearerFrom(header) {
   return m ? m[1].trim() : null;
 }
 
-/** Build a fresh MCP server exposing the read-only Canvas tools. */
-export function buildMcpServer(db) {
+const asText = (o) => ({ content: [{ type: 'text', text: JSON.stringify(o, null, 1) }] });
+
+/** How long sync_now waits for a run to finish before answering "still running". */
+const SYNC_WAIT_MS = Number(process.env.MCP_SYNC_WAIT_MS || 55000);
+
+/**
+ * Build a fresh MCP server exposing the read-only Canvas tools, plus sync
+ * controls when a scheduler is supplied. A stalled mirror used to be silent
+ * here: every read tool answered from the last good sync with no hint that
+ * the cookie had expired weeks ago.
+ */
+export function buildMcpServer(db, { scheduler = null } = {}) {
   const server = new McpServer(
     { name: CANVAS_SERVER_INFO.name, version: CANVAS_SERVER_INFO.version },
     { instructions: CANVAS_SERVER_INFO.instructions, capabilities: { tools: {} } },
@@ -50,6 +62,37 @@ export function buildMcpServer(db) {
       async (args) => def.handler(args ?? {}, {}),
     );
   }
+
+  if (scheduler) {
+    server.registerTool(
+      'sync_status',
+      {
+        description: 'Freshness of the Canvas mirror: last successful sync, last attempt, current state (ok, running, stalled, error, no_cookie) and the last error. Check this before trusting results that may be newer than the last sync.',
+        inputSchema: {},
+        annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      },
+      async () => asText({ ...syncStatus(db), running: scheduler.isRunning() }),
+    );
+    server.registerTool(
+      'sync_now',
+      {
+        description: 'Re-pull everything from Canvas now. Waits for the run to finish (up to about a minute) and returns the resulting status. If the Canvas session has expired the state comes back "stalled": a fresh cookie must be pasted on the app\'s /settings page first.',
+        inputSchema: { wait: z.boolean().default(true).describe('Wait for the sync to finish before answering.') },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      },
+      async ({ wait = true } = {}) => {
+        const status = () => ({ ...syncStatus(db), running: scheduler.isRunning() });
+        if (!status().cookie_configured) return asText({ started: false, ...status() });
+        const already = scheduler.isRunning();
+        const run = already ? null : scheduler.tick('mcp');
+        if (!wait) return asText({ started: !already, already_running: already, ...status() });
+        if (run) {
+          await Promise.race([run, new Promise((r) => setTimeout(r, SYNC_WAIT_MS))]);
+        }
+        return asText({ started: !already, already_running: already, ...status() });
+      },
+    );
+  }
   return server;
 }
 
@@ -57,7 +100,7 @@ export function buildMcpServer(db) {
  * Mount POST/GET/DELETE /mcp on an Express app.
  * Returns false (and mounts nothing) when no token is configured.
  */
-export function mountMcp(app, db, { token = process.env.MCP_TOKEN, log = console.log } = {}) {
+export function mountMcp(app, db, { token = process.env.MCP_TOKEN, log = console.log, scheduler = null } = {}) {
   if (!token) {
     log('mcp: MCP_TOKEN not set — /mcp is disabled. Set one to enable the connector.');
     return false;
@@ -87,7 +130,9 @@ export function mountMcp(app, db, { token = process.env.MCP_TOKEN, log = console
   };
 
   const handle = async (req, res) => {
-    const server = buildMcpServer(db);
+    // The scheduler may be created after mounting, so it can be passed lazily.
+    const sched = typeof scheduler === 'function' ? scheduler() : scheduler;
+    const server = buildMcpServer(db, { scheduler: sched });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     // Tear both down when the client goes away, or a long-lived connector
     // leaks a server per request.
@@ -117,6 +162,6 @@ export function mountMcp(app, db, { token = process.env.MCP_TOKEN, log = console
   app.get('/mcp/:token', authed, noSession);
   app.delete('/mcp/:token', authed, noSession);
 
-  log('mcp: /mcp enabled (bearer header or /mcp/<token>, 7 read-only tools)');
+  log(`mcp: /mcp enabled (bearer header or /mcp/<token>, 7 read-only tools${scheduler ? ' + sync_status, sync_now' : ''})`);
   return true;
 }

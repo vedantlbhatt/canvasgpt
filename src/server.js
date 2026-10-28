@@ -245,7 +245,7 @@ app.get('/api/changes', requireAuth, (req, res) => {
 
 // Remote MCP endpoint for Claude connectors. Mounted before the auth-gated
 // pages because it carries its own bearer credential, not the session cookie.
-mountMcp(app, db);
+mountMcp(app, db, { scheduler: () => scheduler });
 
 app.get('/verify', (req, res) => {
   if (!req.session) return res.redirect('/');

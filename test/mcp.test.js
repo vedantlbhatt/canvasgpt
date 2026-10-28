@@ -15,7 +15,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 
 import { startMockCanvas, COOKIE } from './mock-canvas.js';
 import { openDb } from '../src/db.js';
-import { runSync, setCookie } from '../src/sync.js';
+import { runSync, setCookie, startScheduler } from '../src/sync.js';
 import { mountMcp, tokenMatches, bearerFrom } from '../src/mcp.js';
 import { canvasToolDefs } from '../src/tools.js';
 
@@ -24,7 +24,7 @@ const quiet = () => {};
 const TOKEN = 'test-token-long-enough-to-be-accepted';
 
 /** A populated database behind a live /mcp endpoint. */
-async function serve({ token = TOKEN } = {}) {
+async function serve({ token = TOKEN, withScheduler = false } = {}) {
   const mock = await startMockCanvas({ subentryCounts: { 12: 1 }, threadsByTopic: { 12: [
     { id: 700, user_id: 5, message: '<p>a reply about rubrics</p>', created_at: '2026-09-01T10:00:00Z' },
   ] }, participantsByTopic: { 12: [{ id: 5, display_name: 'Ada' }] } });
@@ -35,13 +35,19 @@ async function serve({ token = TOKEN } = {}) {
 
   const app = express();
   app.use(express.json({ limit: '1mb' }));
-  const mounted = mountMcp(app, db, { token, log: quiet });
+  const scheduler = withScheduler ? startScheduler(db, { hours: 100, log: quiet }) : null;
+  if (scheduler) {
+    // Let the boot tick start and finish so tests begin from a settled state.
+    await new Promise((r) => setTimeout(r, 1600));
+    while (scheduler.isRunning()) await new Promise((r) => setTimeout(r, 50));
+  }
+  const mounted = mountMcp(app, db, { token, log: quiet, scheduler });
   const server = app.listen(0, '127.0.0.1');
   await new Promise((r) => server.once('listening', r));
   const url = `http://127.0.0.1:${server.address().port}/mcp`;
   return {
     db, url, mounted,
-    close: async () => { server.closeAllConnections?.(); await new Promise((r) => server.close(r)); await mock.close(); },
+    close: async () => { scheduler?.stop(); server.closeAllConnections?.(); await new Promise((r) => server.close(r)); await mock.close(); },
   };
 }
 
@@ -216,5 +222,39 @@ test('the token may ride in the path for clients that cannot send headers', asyn
   await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp/${TOKEN}`)));
   assert.ok((await client.listTools()).tools.length === 7);
   await client.close();
+  await s.close();
+});
+
+test('sync_status reports freshness and sync_now re-pulls Canvas', async () => {
+  const s = await serve({ withScheduler: true });
+  const client = await connect(s.url);
+  const names = (await client.listTools()).tools.map((t) => t.name);
+  assert.ok(names.includes('sync_status') && names.includes('sync_now'));
+  assert.equal(names.length, 9);
+
+  const before = JSON.parse((await client.callTool({ name: 'sync_status', arguments: {} })).content[0].text);
+  assert.equal(before.state, 'ok');
+  assert.equal(before.cookie_configured, true);
+
+  const after = JSON.parse((await client.callTool({ name: 'sync_now', arguments: {} })).content[0].text);
+  assert.equal(after.state, 'ok');
+  assert.ok(after.last_sync_at >= before.last_sync_at);
+  assert.equal(after.running, false);
+
+  await client.close();
+  await s.close();
+});
+
+test('sync_now surfaces an expired Canvas session as stalled', async () => {
+  const s = await serve({ withScheduler: true });
+  // A Canvas whose session has lapsed: every request now answers 401.
+  const expired = await startMockCanvas({ expireAfter: 0 });
+  process.env.CANVAS_HOST = expired.url;
+  const client = await connect(s.url);
+  const out = JSON.parse((await client.callTool({ name: 'sync_now', arguments: {} })).content[0].text);
+  assert.equal(out.state, 'stalled');
+  assert.match(out.last_error, /expired/i);
+  await client.close();
+  await expired.close();
   await s.close();
 });
