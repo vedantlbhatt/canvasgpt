@@ -31,8 +31,22 @@ export function syncStatus(db) {
     last_source: getMeta(db, 'last_sync_source'),
     cookie_configured: !!getCookie(db),
     cookie_set_at: getMeta(db, 'canvas_cookie_set_at'),
+    cookie_rotated_at: getMeta(db, 'canvas_cookie_rotated_at'),
     stalled: getMeta(db, 'sync_state') === 'stalled',
   };
+}
+
+/**
+ * Store the cookie Canvas rotated during a run. Without this the pasted value
+ * is replayed unchanged until the server's session clock kills it, which is
+ * what left the mirror stalled for weeks. `canvas_cookie_set_at` is left alone:
+ * it records when a human last pasted one.
+ */
+function keepRotatedCookie(db, client) {
+  const fresh = client.rotatedCookie();
+  if (!fresh || getMeta(db, 'canvas_cookie') === fresh) return;
+  setMeta(db, 'canvas_cookie', fresh);
+  setMeta(db, 'canvas_cookie_rotated_at', nowIso());
 }
 
 /** Pull one course's sub-resources. Every failure here is survivable. */
@@ -230,6 +244,7 @@ export async function runSync(db, { log = console.log } = {}) {
     };
 
     const stats = ingestDump(db, dump);
+    keepRotatedCookie(db, client);
     setMeta(db, 'sync_state', 'ok');
     setMeta(db, 'sync_error', '');
     log(`sync: done — ${stats.changes} changes, ${client.stats.requests} requests ` +
@@ -242,6 +257,8 @@ export async function runSync(db, { log = console.log } = {}) {
       setMeta(db, 'sync_error', 'Canvas session expired. Paste a fresh cookie on the settings page.');
       log('sync: STALLED — Canvas session expired. Serving last-synced data.');
     } else {
+      // Canvas still accepted the session, so whatever it rotated is live.
+      keepRotatedCookie(db, client);
       setMeta(db, 'sync_state', 'error');
       setMeta(db, 'sync_error', err.message);
       log(`sync: failed — ${err.message}`);

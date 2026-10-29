@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { localTime, truncate } from './util.js';
+import { syncStatus } from './sync.js';
 
 const text = (s) => ({ content: [{ type: 'text', text: s }] });
 const json = (o) => text(JSON.stringify(o, null, 1));
@@ -26,7 +27,7 @@ const courseLine = (c) => ({
 /**
  * The tool definitions themselves: plain {name, description, inputSchema, handler}
  * objects. Shared so the local agent and the remote MCP connector expose exactly
- * the same seven read-only tools rather than drifting apart.
+ * the same eight read-only tools rather than drifting apart.
  */
 export function canvasToolDefs(db) {
   const listDue = tool(
@@ -305,7 +306,32 @@ export function canvasToolDefs(db) {
     },
   );
 
-  return [listCourses, listDue, search, getCourse, getItem, grades, recentChanges];
+  const status = tool(
+    'sync_status',
+    'How fresh the mirror is: when Canvas was last synced, whether the sync is stalled on an expired cookie, and the last error. Check this before trusting "nothing changed" or "nothing due".',
+    {},
+    async () => {
+      const st = syncStatus(db);
+      const ageHours = st.last_sync_at ? (Date.now() - Date.parse(st.last_sync_at)) / 3600000 : null;
+      return json({
+        state: st.state,
+        stalled: st.stalled,
+        last_sync_at: st.last_sync_at,
+        last_sync_local: st.last_sync_at ? localTime(st.last_sync_at) : null,
+        sync_age_hours: ageHours == null ? null : Math.round(ageHours * 10) / 10,
+        last_attempt_at: st.last_attempt_at,
+        last_error: st.last_error,
+        cookie_configured: st.cookie_configured,
+        cookie_set_at: st.cookie_set_at,
+        cookie_rotated_at: st.cookie_rotated_at,
+        fix: st.stalled || st.state === 'no_cookie'
+          ? 'Paste a fresh Canvas cookie on the app\'s /settings page; it re-syncs immediately.'
+          : undefined,
+      });
+    },
+  );
+
+  return [listCourses, listDue, search, getCourse, getItem, grades, recentChanges, status];
 }
 
 export const CANVAS_SERVER_INFO = {
@@ -320,5 +346,5 @@ export function buildCanvasTools(db) {
 }
 
 export const CANVAS_TOOL_NAMES = [
-  'list_courses', 'list_due', 'search', 'get_course', 'get_item', 'grades', 'recent_changes',
+  'list_courses', 'list_due', 'search', 'get_course', 'get_item', 'grades', 'recent_changes', 'sync_status',
 ].map((n) => `mcp__canvas__${n}`);

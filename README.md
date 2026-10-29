@@ -26,7 +26,7 @@ environment. `ANTHROPIC_API_KEY` also works if you'd rather meter it.
 
 ## Use it as a Claude connector
 
-The same seven read-only tools are served over MCP at `/mcp`, so Claude can
+The same eight read-only tools are served over MCP at `/mcp`, so Claude can
 query this mirror directly. The endpoint is **disabled unless `MCP_TOKEN` is
 set** — an unauthenticated Canvas mirror on a public URL hands a stranger your
 coursework.
@@ -78,7 +78,7 @@ recovered through module items after their index was blocked.
 
 ## What the model can do
 
-Seven read-only tools over SQLite, and nothing else — no filesystem, no bash,
+Eight read-only tools over SQLite, and nothing else — no filesystem, no bash,
 no web access, no built-in Claude Code tools at all:
 
 | tool | for |
@@ -90,6 +90,7 @@ no web access, no built-in Claude Code tools at all:
 | `get_item` | full text of one assignment / announcement / page / quiz, plus your submission state |
 | `grades` | current score per course, what's ungraded, what's missing |
 | `recent_changes` | reads the `changes` table |
+| `sync_status` | when the mirror last synced, and whether it is stalled on a dead cookie |
 
 Every turn tells the model today's date, that timestamps are UTC, that you're in
 America/New_York, and that it must cite the Canvas `html_url`.
@@ -128,6 +129,16 @@ or serves the SSO page. The sync marks itself `stalled`, keeps serving the last
 good data, and the chat UI shows a red banner linking to `/settings`, where you
 paste a fresh cookie and it re-syncs immediately. No redeploy.
 
+Canvas rotates its session cookie through `Set-Cookie` as it serves requests.
+The client merges every rotation back into the stored cookie, the way a browser
+would, so each scheduled sync hands the next one a current session instead of
+replaying the pasted string until the server ages it out. A rotation is stamped
+as `cookie_rotated_at` in the sync status; a logout or an SSO-enforced maximum
+session age still kills it, and then you paste a fresh one as below.
+
+The `sync_status` tool reports the same state to the model and the connector,
+so a stalled mirror shows up as stale rather than as "nothing changed".
+
 ### Copying the cookie
 
 1. Open `gatech.instructure.com` in Chrome, logged in.
@@ -142,7 +153,7 @@ paste a fresh cookie and it re-syncs immediately. No redeploy.
 npm test
 ```
 
-47 tests against a mock Canvas server that reproduces the real quirks: the
+50 tests against a mock Canvas server that reproduces the real quirks: the
 `while(1);` prefix on every response, Link-header pagination, 403 on locked
 resources, 404 on a disabled feature's index (while individual objects still
 resolve — the gap recovery exists to close), and bare 429 throttling.
@@ -175,7 +186,7 @@ resolve — the gap recovery exists to close), and bare 429 throttling.
 ```
 src/schema.sql   tables + FTS5 index
 src/ingest.js    dump -> SQLite, with the diff engine
-src/tools.js     the seven tools the model gets (shared by chat and connector)
+src/tools.js     the eight tools the model gets (shared by chat and connector)
 src/verify.js    live re-fetch and diff against SQLite
 src/mcp.js       remote MCP endpoint for Claude connectors
 src/agent.js     Claude Agent SDK wiring + system prompt

@@ -214,7 +214,7 @@ test('the token may ride in the path for clients that cannot send headers', asyn
   // And it works end to end through a real client.
   const client = new Client({ name: 'test', version: '1' });
   await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp/${TOKEN}`)));
-  assert.ok((await client.listTools()).tools.length === 7);
+  assert.ok((await client.listTools()).tools.length === 8);
   await client.close();
   await s.close();
 });

@@ -9,7 +9,7 @@
  *   2. Bearer auth, failing closed. Without MCP_TOKEN the endpoint is not
  *      mounted at all — an unauthenticated Canvas mirror on a public URL would
  *      hand a stranger the user's coursework.
- *   3. The same seven read-only tools the local agent gets, from one shared
+ *   3. The same eight read-only tools the local agent gets, from one shared
  *      definition list. A connector that could do more than the chat UI would
  *      be a second, unaudited surface.
  */

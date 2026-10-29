@@ -121,6 +121,36 @@ test('the cookie never appears in an error message or a status payload', async (
   await mock.close();
 });
 
+test('a cookie Canvas rotates mid-sync is kept, used, and stored for the next run', async () => {
+  const mock = await startMockCanvas({ rotateSession: 'rotated456' });
+  const db = openDb(tmpDb());
+  setCookie(db, COOKIE);
+  process.env.CANVAS_HOST = mock.url;
+
+  await runSync(db, { log: quiet });
+  const stored = db.prepare(`SELECT value FROM meta WHERE key='canvas_cookie'`).get().value;
+  assert.match(stored, /canvas_session=rotated456/, 'rotated session persisted');
+  assert.match(stored, /_csrf_token=tok/, 'new cookie added to the jar');
+  assert.ok(!stored.includes('_normandy_session'), 'a Max-Age=0 cookie is dropped');
+  assert.ok(!stored.includes('abc123'), 'stale session value replaced');
+  assert.ok([...mock.state.cookiesSeen].some((c) => c.includes('rotated456')), 'later requests sent the rotated cookie');
+  const st = syncStatus(db);
+  assert.ok(st.cookie_rotated_at, 'rotation is timestamped');
+  assert.ok(!JSON.stringify(st).includes('rotated456'), 'status still never carries the cookie');
+  await mock.close();
+});
+
+test('a cookie that never rotates is left exactly as pasted', async () => {
+  const mock = await startMockCanvas();
+  const db = openDb(tmpDb());
+  setCookie(db, COOKIE);
+  process.env.CANVAS_HOST = mock.url;
+  await runSync(db, { log: quiet });
+  assert.equal(db.prepare(`SELECT value FROM meta WHERE key='canvas_cookie'`).get().value, COOKIE);
+  assert.equal(syncStatus(db).cookie_rotated_at, null);
+  await mock.close();
+});
+
 test('a second sync with no upstream changes records nothing', async () => {
   const mock = await startMockCanvas();
   const db = openDb(tmpDb());

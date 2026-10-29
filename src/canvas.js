@@ -48,6 +48,7 @@ export class CanvasClient {
     if (!cookie) throw new Error('No Canvas cookie configured.');
     this.host = String(host || 'https://gatech.instructure.com').replace(/\/$/, '');
     this.#cookie = cookie;
+    this.#jar = parseCookieHeader(cookie);
     this.log = log;
     this.concurrency = concurrency;
     this.timeoutMs = timeoutMs;
@@ -56,6 +57,43 @@ export class CanvasClient {
 
   /** Private so it cannot be reached from a tool, an endpoint, or a stack trace. */
   #cookie;
+  #jar;
+  #rotated = false;
+
+  /**
+   * Canvas rotates `canvas_session` (and friends) via Set-Cookie as it serves
+   * requests. A browser keeps the new value; a client that keeps replaying the
+   * pasted string is holding a session that ages out on the server's clock
+   * no matter how often it syncs. Merge every rotation back into the jar.
+   */
+  #absorb(res) {
+    const lines = res.headers.getSetCookie?.() || [];
+    for (const line of lines) {
+      const [pair, ...attrs] = line.split(';');
+      const eq = pair.indexOf('=');
+      if (eq <= 0) continue;
+      const name = pair.slice(0, eq).trim();
+      const value = pair.slice(eq + 1).trim();
+      const expired = attrs.some((a) => {
+        const [k, v = ''] = a.split('=').map((x) => x.trim());
+        if (/^max-age$/i.test(k)) return Number(v) <= 0;
+        if (/^expires$/i.test(k)) return Date.parse(v) <= Date.now();
+        return false;
+      });
+      if (expired || !value) {
+        if (this.#jar.delete(name)) this.#rotated = true;
+      } else if (this.#jar.get(name) !== value) {
+        this.#jar.set(name, value);
+        this.#rotated = true;
+      }
+    }
+    if (this.#rotated) this.#cookie = [...this.#jar].map(([k, v]) => `${k}=${v}`).join('; ');
+  }
+
+  /** The cookie as Canvas last left it, or null if it never rotated. */
+  rotatedCookie() {
+    return this.#rotated ? this.#cookie : null;
+  }
 
   #url(pathOrUrl) {
     const url = pathOrUrl.startsWith('http')
@@ -95,6 +133,9 @@ export class CanvasClient {
       throw new Error(`GET ${safeUrl} failed: ${err.name === 'AbortError' ? 'timed out' : err.message}`);
     }
     clearTimeout(timer);
+    // Only keep rotations from a response that is not a rejection: a 401 or
+    // the SSO page can hand out a fresh anonymous session we must not adopt.
+    if (res.status !== 401 && !res.redirected) this.#absorb(res);
 
     // Canvas answers an expired cookie with a 401, or by redirecting to the
     // SSO login page with a 200. Both mean the same thing.
@@ -207,6 +248,17 @@ export class CanvasClient {
   async whoami() {
     return this.get('users/self/profile');
   }
+}
+
+/** `a=1; b=2` -> Map, preserving order. Values may themselves contain `=`. */
+function parseCookieHeader(header) {
+  const jar = new Map();
+  for (const part of String(header).split(';')) {
+    const eq = part.indexOf('=');
+    if (eq <= 0) continue;
+    jar.set(part.slice(0, eq).trim(), part.slice(eq + 1).trim());
+  }
+  return jar;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

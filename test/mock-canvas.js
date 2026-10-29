@@ -22,6 +22,7 @@ export function startMockCanvas(opts = {}) {
     threadsByTopic = {},      // topic id -> nested entry tree
     subentryCounts = {},      // topic id -> discussion_subentry_count
     participantsByTopic = {}, // topic id -> [{ id, display_name }]
+    rotateSession = null,     // new canvas_session value Set-Cookie'd on the profile call
   } = opts;
 
   let throttled = 0;
@@ -73,6 +74,13 @@ export function startMockCanvas(opts = {}) {
       return send(res, 200, { id: fid, display_name: `recovered${fid}.pdf`, filename: `recovered${fid}.pdf`, 'content-type': 'application/pdf', size: 42 });
     }
 
+    if (p === 'users/self/profile' && rotateSession) {
+      res.setHeader('Set-Cookie', [
+        `canvas_session=${rotateSession}; path=/; secure; HttpOnly`,
+        '_csrf_token=tok; path=/; secure',
+        '_normandy_session=; path=/; Max-Age=0',
+      ]);
+    }
     if (p === 'users/self/profile') return send(res, 200, { id: 7, name: 'Test Student', time_zone: 'America/New_York' });
     if (p === 'users/self/todo' || p === 'users/self/upcoming_events' || p === 'planner/items') return page(res, url, [], pageSize);
     if (p === 'courses') return page(res, url, courses, pageSize);
